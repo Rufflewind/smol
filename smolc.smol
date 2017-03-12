@@ -1,0 +1,1290 @@
+# COMMANDS:
+#
+# mov [*]<dest_var> [*]<src_var>
+# set <dest_var> <int>
+# setstr <dest_var> "<str>"
+#   (stores the length in the first element)
+# call <count> <label>
+#   push a new stack frame
+#   <count> and the current address are stored
+#   at the end of the current stack frame
+# ret
+#   pop the current stack frame
+#   return to the stored address at end of the previous frame
+# jmp <var> <label>
+# . <label>
+# add <dest_var> <lhs> <rhs>
+# sub <dest_var> <lhs> <rhs>
+# mul <dest_var> <lhs> <rhs>
+# div <dest_var> <lhs> <rhs>
+# not <dest_var> <var>
+# lt <dest_var> <lhs> <rhs>
+# get <dest_var>
+# put <src_var> (stderr if $0 != 0, else stdout)
+#
+# MEMORY
+#
+# positive = global memory
+# negative = local memory (relative to stack pointer)
+# -30000 to -1 stack (relative)
+# 0 conventionally set to zero
+# 1 conventionally set to one
+# 2 stack pointer
+# 3 exit code (either EXIT_SUCCESS or EXIT_FAILURE)
+# 4 output flag (stdout (== 0) vs stderr (!= 0))
+# 5-999 reserved
+# 1000-1020 function arguments and return values
+# 30000-59999 stack (absolute)
+
+set 0 0
+set 1 1
+
+# ------------------------------------------------------------------------
+
+# output the prelude
+setstr 10000 "#include<stdio.h>
+#include<stdlib.h>
+static int *mem;
+int *MGET(int x)
+{
+if (x < -30000 || x >= 60000) {
+fprintf(stderr, \"error: cannot access memory at %i\\n\", x);
+abort();
+}
+if (x < 0) {
+int i = (x - *MGET(2)) % 30000;
+return mem + 30000 + (i >= 0 ? i : i + 30000);
+}
+return mem + x;
+}
+int main(void)
+{
+mem = (int *)malloc(60000 * sizeof(*mem));
+int fptr = 0;
+while (1) {
+switch (fptr) {
+case 0:
+"
+set 1000 10001
+mov 1001 10000
+call 20 print
+
+
+# -- main loop --
+#
+# current char: -10
+# next return ptr: 8002
+# char index (within current line buffer): 8000
+# number of args: 20000
+# parser state: -12
+#   normal = 0
+#   in string literal = 1
+#   in string literal, after backslash = 2
+# length of current segment: 8001
+# start of current line segments: 21000 (max size 1024)
+# start arg pointers and lengths: 20001 (max size 128*2)
+#   alternating: char *, size_t, char *, size_t, ...
+#
+set 8002 1
+set 20001 21000
+set 20002 0
+. main_loop
+get -10
+
+
+    # dispatch state
+    set -1 2
+    sub -1 -1 -12
+    not -1 -1
+    jmp -1 main_escaped
+    set -1 1
+    sub -1 -1 -12
+    not -1 -1
+    jmp -1 main_string
+    jmp 1 main_normal
+
+
+        . main_normal
+        set -1 34
+        sub -1 -1 -10
+        not -1 -1
+        jmp -1 main_normal_quote
+        set -1 32
+        sub -1 -1 -10
+        not -1 -1
+        jmp -1 main_normal_space
+        set -1 10
+        sub -1 -1 -10
+        not -1 -1
+        jmp -1 main_normal_newline
+        lt -1 -10 0
+        jmp -1 main_normal_newline
+        jmp 1 main_push_char
+
+            . main_normal_quote
+            set -12 1
+            jmp 1 main_loop
+
+            . main_normal_space
+            call 50 push_segment
+            jmp 1 main_loop
+
+            . main_normal_newline
+            call 50 push_segment
+            not -1 8000
+            jmp -1 main_normal_newline_skip
+            call 50 handle
+            set 20000 0
+            set 8000 0
+            . main_normal_newline_skip
+            lt -1 -10 0
+            jmp -1 main_loop_break
+            jmp 1 main_loop
+
+
+        . main_string
+        set -1 34
+        sub -1 -1 -10
+        not -1 -1
+        jmp -1 main_string_quote
+        set -1 92
+        sub -1 -1 -10
+        not -1 -1
+        jmp -1 main_string_backslash
+        jmp 1 main_push_char
+
+            . main_string_quote
+            set -12 0
+            jmp 1 main_loop
+
+            . main_string_backslash
+            set -12 2
+            jmp 1 main_loop
+
+
+        . main_escaped
+        mov 1000 -10
+        call 50 push_char
+        set -12 1
+        jmp 1 main_loop
+
+
+        . main_push_char
+        mov 1000 -10
+        call 50 push_char
+        jmp 1 main_loop
+
+
+# -- end of main loop --
+
+. main_loop_break
+setstr 10000 "return *MGET(3) ? EXIT_FAILURE : 0;
+}
+}
+}
+"
+set 1000 10001
+mov 1001 10000
+call 20 print
+jmp 1 exit
+
+# ------------------------------------------------------------------------
+
+
+. inc_char_index
+    add 8000 8000 1
+    set -1 1024
+    lt -1 8000 -1
+    jmp -1 inc_char_index_ok
+        setstr 10000 "error: line too long"
+        set 1000 10000
+        call 20 error
+    . inc_char_index_ok
+ret
+
+
+. inc_num_args
+    add 20000 20000 1
+    set -1 64
+    lt -1 20000 -1
+    jmp -1 inc_num_args_ok
+        setstr 10000 "error: line has too many tokens"
+        set 1000 10000
+        call 20 error
+    . inc_num_args_ok
+ret
+
+
+. push_char
+    set -1 21000
+    add -1 -1 8000
+    mov *-1 1000
+    call 20 inc_char_index
+    add 8001 8001 1
+ret
+
+
+. push_segment
+    not -1 8001
+    jmp -1 push_segment_skip
+        # args[num_args * 2 + 1] = segment_len
+        set -1 20002
+        add -1 -1 20000
+        add -1 -1 20000
+        mov *-1 8001
+        # ++num_args
+        call 50 inc_num_args
+        # args[num_args * 2] = buffer + char_index
+        set -1 20001
+        add -1 -1 20000
+        add -1 -1 20000
+        set -2 21000
+        add -2 -2 8000
+        mov *-1 -2
+        set 8001 0
+    . push_segment_skip
+ret
+
+
+. handle
+
+    # pre-condition: num_args > 0
+    # pre-condition: len of each arg > 0
+
+    # ignore comments
+    mov -1 *20001
+    set -2 35
+    sub -1 -1 -2
+    jmp -1 handle_not_comment
+        ret
+    . handle_not_comment
+
+    # -------------------- mov --------------------
+
+    setstr 10000 "mov"
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_mov
+
+        set -1 3
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 " = "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20005
+        mov 1001 20006
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 ";
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        ret
+    . handle_not_mov
+
+    # -------------------- set --------------------
+
+    setstr 10000 "set"
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_set
+
+        set -1 3
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 " = "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20005
+        mov 1001 20006
+        call 50 print_int_str
+        jmp 1000 handle_error
+
+        setstr 10000 ";
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        ret
+    . handle_not_set
+
+    # -------------------- setstr --------------------
+
+    setstr 10000 "setstr"
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_setstr
+
+        set -1 3
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        setstr 10000 "*MGET("
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 parse_int
+        jmp 1000 handle_error
+        mov -5 1001
+
+        mov 1000 -5
+        call 50 print_dec_int
+
+        setstr 10000 ") = "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20006
+        call 50 print_dec_int
+
+        setstr 10000 ";
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        set -9 0
+        . handle_setstr_loop
+        lt -1 -9 20006
+        not -1 -1
+        jmp -1 handle_setstr_loop_break
+
+            setstr 10000 "*MGET("
+            set 1000 10001
+            mov 1001 10000
+            call 50 print
+
+            add 1000 -5 -9
+            add 1000 1000 1
+            call 50 print_dec_int
+
+            setstr 10000 ") = "
+            set 1000 10001
+            mov 1001 10000
+            call 50 print
+
+            mov -1 20005
+            add -1 -1 -9
+            mov 1000 *-1
+            call 50 print_dec_int
+
+            setstr 10000 ";
+"
+            set 1000 10001
+            mov 1001 10000
+            call 50 print
+
+            add -9 -9 1
+        jmp 1 handle_setstr_loop
+        . handle_setstr_loop_break
+
+        ret
+    . handle_not_setstr
+
+    # -------------------- call --------------------
+
+    setstr 10000 "call"
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_call
+
+        set -1 3
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        setstr 10000 "*MGET(2) += "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 print_int_str
+        jmp 1000 handle_error
+
+        setstr 10000 ";
+*MGET(-29999) = "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 print_int_str
+        jmp 1000 handle_error
+
+        setstr 10000 ";
+*MGET(-30000) = "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 8002
+        call 50 print_dec_int
+
+        setstr 10000 ";
+goto "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20005
+        mov 1001 20006
+        call 50 print_label
+        jmp 1000 handle_error
+
+        setstr 10000 ";
+case "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 8002
+        call 50 print_dec_int
+
+        setstr 10000 ":
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        add 8002 8002 1
+
+        ret
+    . handle_not_call
+
+    # -------------------- ret --------------------
+
+    setstr 10000 "ret"
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_ret
+
+        set -1 1
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        setstr 10000 "fptr = *MGET(-30000);
+*MGET(2) -= *MGET(-29999);
+break;
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        ret
+    . handle_not_ret
+
+    # -------------------- jmp --------------------
+
+    setstr 10000 "jmp"
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_jmp
+
+        set -1 3
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        setstr 10000 "if ("
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 ") goto "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20005
+        mov 1001 20006
+        call 50 print_label
+        jmp 1000 handle_error
+
+        setstr 10000 ";
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        ret
+    . handle_not_jmp
+
+    # -------------------- label --------------------
+
+    setstr 10000 "."
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_label
+
+        set -1 2
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 print_label
+        jmp 1000 handle_error
+
+        setstr 10000 ":
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        ret
+    . handle_not_label
+
+    # -------------------- add --------------------
+
+    setstr 10000 "add"
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_add
+
+        set -1 4
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 " = "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20005
+        mov 1001 20006
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 " + "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20007
+        mov 1001 20008
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 ";
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        ret
+    . handle_not_add
+
+    # -------------------- sub --------------------
+
+    setstr 10000 "sub"
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_sub
+
+        set -1 4
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 " = "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20005
+        mov 1001 20006
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 " - "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20007
+        mov 1001 20008
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 ";
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        ret
+    . handle_not_sub
+
+    # -------------------- mul --------------------
+
+    setstr 10000 "mul"
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_mul
+
+        set -1 4
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 " = "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20005
+        mov 1001 20006
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 " * "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20007
+        mov 1001 20008
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 ";
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        ret
+    . handle_not_mul
+
+    # -------------------- div --------------------
+
+    setstr 10000 "div"
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_div
+
+        set -1 4
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 " = "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20005
+        mov 1001 20006
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 " / "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20007
+        mov 1001 20008
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 ";
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        ret
+    . handle_not_div
+
+    # -------------------- not --------------------
+
+    setstr 10000 "not"
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_not
+
+        set -1 3
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 " = !"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20005
+        mov 1001 20006
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 ";
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        ret
+    . handle_not_not
+
+    # -------------------- lt --------------------
+
+    setstr 10000 "lt"
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_lt
+
+        set -1 4
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 " = "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20005
+        mov 1001 20006
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 " < "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20007
+        mov 1001 20008
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 ";
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        ret
+    . handle_not_lt
+
+    # -------------------- get --------------------
+
+    setstr 10000 "get"
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_get
+
+        set -1 2
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        setstr 10000 "{ int c = getchar(); "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 " = c == EOF ? -1 : c; }
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        ret
+    . handle_not_get
+
+    # -------------------- put --------------------
+
+    setstr 10000 "put"
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_put
+
+        set -1 2
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        setstr 10000 "putc("
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 ", *MGET(4) ? stderr : stdout);
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        ret
+    . handle_not_put
+
+    # -------------------- debug --------------------
+
+    setstr 10000 "debug"
+    set 1000 10001
+    mov 1001 10000
+    mov 1002 20001
+    mov 1003 20002
+    call 50 str_not_eq
+    jmp 1000 handle_not_debug
+
+        set -1 2
+        sub -1 -1 20000
+        jmp -1 handle_error
+
+        setstr 10000 "fprintf(stderr, \"<<<[DEBUG]: %i>>>\\n\", "
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        mov 1000 20003
+        mov 1001 20004
+        call 50 print_ref
+        jmp 1000 handle_error
+
+        setstr 10000 ");
+fflush(stderr);
+"
+        set 1000 10001
+        mov 1001 10000
+        call 50 print
+
+        ret
+    . handle_not_debug
+
+    . handle_error
+    set 4 1
+    setstr 10000 "error: incorrect syntax:"
+    set 1000 10001
+    mov 1001 10000
+    call 50 print
+    call 50 print_segments
+    set 3 1
+    jmp 1 exit
+ret
+
+
+. print_ref
+    mov -8 1000
+    mov -9 1001
+
+    setstr 10000 "*MGET("
+    set 1000 10001
+    mov 1001 10000
+    call 20 print
+
+    # check for dereferencing
+    set 10000 0
+    setstr 10100 ")"
+    set -1 42
+    mov -2 *-8
+    sub -1 -1 -2
+    jmp -1 handler_move_no_deref
+        setstr 10000 "*MGET("
+        setstr 10100 "))"
+        add -8 -8 1
+        sub -9 -9 1
+    . handler_move_no_deref
+
+    set 1000 10001
+    mov 1001 10000
+    call 20 print
+
+    mov 1000 -8
+    mov 1001 -9
+    call 20 print_int_str
+    jmp 1000 print_ref_error
+
+    set 1000 10101
+    mov 1001 10100
+    call 20 print
+
+    set 1000 0
+    . print_ref_error
+ret
+
+
+. print_label
+    mov -8 1000
+    mov -9 1001
+
+    sub -1 -9 0
+    jmp -1 print_label_not_empty
+        set 1000 1
+        ret
+    . print_label_not_empty
+
+    # 0-9  48-57
+    # A-Z  65-90
+    # _    95
+    # a-z  97-122
+    set -10 47
+    set -11 58
+    set -12 64
+    set -13 91
+    set -14 95
+    set -15 96
+    set -16 123
+
+    # [A-Za-z_]
+    mov -7 *-8
+    lt -1 -12 -7
+    lt -2 -7 -13
+    mul -1 -1 -2
+    lt -2 -15 -7
+    lt -3 -7 -16
+    mul -2 -2 -3
+    add -1 -1 -2
+    sub -2 -7 -14
+    not -2 -2
+    add -1 -1 -2
+    jmp -1 print_label_first_char_valid
+        set 1000 1
+        ret
+    . print_label_first_char_valid
+
+    add -9 -8 -9
+    . print_label_loop
+    lt -1 -8 -9
+    not -1 -1
+    jmp -1 print_label_loop_break
+
+        # [A-Za-z0-9_]
+        mov -7 *-8
+        add -8 -8 1
+        lt -1 -12 -7
+        lt -2 -7 -13
+        mul -1 -1 -2
+        lt -2 -15 -7
+        lt -3 -7 -16
+        mul -2 -2 -3
+        add -1 -1 -2
+        lt -2 -10 -7
+        lt -3 -7 -11
+        mul -2 -2 -3
+        add -1 -1 -2
+        sub -2 -7 -14
+        not -2 -2
+        add -1 -1 -2
+
+        jmp -1 print_label_loop
+            set 1000 1
+            ret
+
+    . print_label_loop_break
+
+    call 50 print
+    set 1000 0
+ret
+
+
+. print_int_str
+    call 20 parse_int
+    jmp 1000 print_int_str_error
+    mov 1000 1001
+    call 20 print_dec_int
+    set 1000 0
+    . print_int_str_error
+ret
+
+
+. parse_int
+    set -7 1
+    mov -8 1000
+    mov -9 1001
+
+    sub -1 -9 0
+    jmp -1 parse_int_not_empty
+        set 1000 1
+        ret
+    . parse_int_not_empty
+
+    set -1 43
+    mov -2 *-8
+    sub -1 -1 -2
+    not -1 -1
+    jmp -1 parse_int_plus
+        set -1 45
+        sub -1 -1 -2
+        jmp -1 parse_int_no_sign
+            set -7 -1
+    . parse_int_plus
+    add -8 -8 1
+    sub -9 -9 1
+    . parse_int_no_sign
+
+    sub -1 -9 0
+    jmp -1 parse_int_not_empty2
+        set 1000 1
+        ret
+    . parse_int_not_empty2
+
+    set -10 47
+    set -11 58
+    set -12 48
+    set -5 10
+    set -6 0
+    add -9 -8 -9
+    . parse_int_loop
+    lt -1 -8 -9
+    not -1 -1
+    jmp -1 parse_int_loop_break
+        # make sure each character is a digit
+        mov -2 *-8
+        lt -1 -10 -2
+        lt -3 -2 -11
+        mul -1 -1 -3
+        jmp -1 parse_int_loop_continue
+            set 1000 1
+            ret
+        . parse_int_loop_continue
+        mul -6 -6 -5
+        sub -1 -2 -12
+        add -6 -6 -1
+        add -8 -8 1
+    jmp 1 parse_int_loop
+    . parse_int_loop_break
+    set 1000 0
+    mul 1001 -7 -6
+ret
+
+
+. print_dec_int
+    mov -9 1000
+    sub -1 -9 0
+    jmp -1 print_dec_not_zero
+        setstr 10000 "0"
+        set 1000 10001
+        mov 1001 10000
+        call 20 print
+        ret
+    . print_dec_not_zero
+    lt -1 -9 0
+    not -1 -1
+    jmp -1 print_dec_not_negative
+        setstr 10000 "-"
+        set 1000 10001
+        mov 1001 10000
+        call 20 print
+        set -1 -1
+        mul -9 -9 -1
+    . print_dec_not_negative
+    set -10 10
+    set -8 10100
+    . print_dec_int_loop
+        div -1 -9 -10
+        mul -2 -1 -10
+        sub -3 -9 -2
+        not -9 -9
+        jmp -9 print_dec_int_loop_break
+        set -4 48
+        add -4 -4 -3
+        sub -8 -8 1
+        mov *-8 -4
+        mov -9 -1
+    jmp 1 print_dec_int_loop
+    . print_dec_int_loop_break
+    set -1 10100
+    sub -1 -1 -8
+    mov 1000 -8
+    mov 1001 -1
+    call 20 print
+ret
+
+
+. print_segments
+    # length, args[0], args[1]
+    set -2 20001
+    set -3 20002
+    set -4 0
+    # while *-4 < *20000
+    . print_segments_loop
+    lt -1 -4 20000
+    not -1 -1
+    jmp -1 print_segments_loop_break
+        set -1 32
+        put -1
+        mov 1000 *-2
+        mov 1001 *-3
+        call 20 print
+        set -1 2
+        add -2 -2 -1
+        add -3 -3 -1
+        add -4 -4 1
+    jmp 1 print_segments_loop
+    . print_segments_loop_break
+    set -1 10
+    put -1
+ret
+
+
+# print the string at *1000 with len *1001
+# as an error and exit with failure
+. error
+    set 4 1
+    call 20 print
+    set 3 1
+jmp 1 exit
+
+
+# print the string at *1000 with len *1001
+. print
+    mov -6 1000
+    mov -5 1001
+    set -2 0
+    # while *-2 < *1001
+    . print_loop
+    lt -3 -2 -5
+    not -3 -3
+    jmp -3 print_loop_break
+        add -4 -6 -2
+        mov -1 *-4
+        put -1
+        add -2 -2 1
+    jmp 1 print_loop
+    . print_loop_break
+ret
+
+
+. str_not_eq
+    sub -1 1001 1003
+    jmp -1 str_eq_unequal
+
+        set -1 0
+        mov -2 1000
+        mov -3 1002
+        # while *-1 < *1001
+        . str_not_eq_loop
+        lt -4 -1 1001
+        not -4 -4
+        jmp -4 str_not_eq_loop_break
+            mov -4 *-2
+            mov -5 *-3
+            sub -4 -4 -5
+            jmp -4 str_eq_unequal
+            add -1 -1 1
+            add -2 -2 1
+            add -3 -3 1
+        jmp 1 str_not_eq_loop
+        . str_not_eq_loop_break
+        set 1000 0
+        ret
+
+    . str_eq_unequal
+    set 1000 1
+ret
+
+
+. exit
